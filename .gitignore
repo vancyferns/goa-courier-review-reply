@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.env
+.credentials.enc
+.token_secret.key
+*.log
+data/*.db
+data/app.db
