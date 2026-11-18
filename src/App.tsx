@@ -11,6 +11,8 @@ import {
   Cpu,
   Database,
   ExternalLink,
+  Eye,
+  EyeOff,
   FileText,
   Home,
   Info,
@@ -154,6 +156,7 @@ export default function App() {
   });
   const [oauthUrl, setOauthUrl] = useState("");
   const [oauthCode, setOauthCode] = useState("");
+  const [showClientSecret, setShowClientSecret] = useState(false);
   const [oauthStatus, setOauthStatus] = useState<{
     type: "ok" | "err";
     text: string;
@@ -464,7 +467,15 @@ export default function App() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(configs),
       });
-      const resp = await fetch("/api/oauth/url", { method: "POST" });
+      const resp = await fetch("/api/oauth/url", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          google_client_id: configs.google_client_id,
+          google_client_secret: configs.google_client_secret,
+          google_redirect_uri: configs.google_redirect_uri,
+        }),
+      });
       const data = await resp.json();
       if (resp.ok && data.url) {
         setOauthUrl(data.url);
@@ -494,7 +505,12 @@ export default function App() {
       const resp = await fetch("/api/oauth/exchange", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ code: oauthCode }),
+        body: JSON.stringify({
+          code: oauthCode,
+          google_client_id: configs.google_client_id,
+          google_client_secret: configs.google_client_secret,
+          google_redirect_uri: configs.google_redirect_uri,
+        }),
       });
       const data = await resp.json();
       if (resp.ok && data.success) {
@@ -1287,18 +1303,44 @@ export default function App() {
                     <label className="block text-xs font-semibold text-slate-600 mb-1.5">
                       Google Client Secret
                     </label>
-                    <input
-                      type="password"
-                      className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 focus:border-[#155eef] focus:outline-none focus:ring-2 focus:ring-blue-500/20"
-                      placeholder="GOCSPX-xxxxxxxxxxxxxxxx"
-                      value={configs.google_client_secret}
-                      onChange={(e) =>
-                        setConfigs({
-                          ...configs,
-                          google_client_secret: e.target.value,
-                        })
-                      }
-                    />
+                    <div className="flex gap-2">
+                      <input
+                        type={showClientSecret ? "text" : "password"}
+                        className="flex-1 rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 focus:border-[#155eef] focus:outline-none focus:ring-2 focus:ring-blue-500/20"
+                        placeholder="GOCSPX-xxxxxxxxxxxxxxxx"
+                        value={configs.google_client_secret}
+                        onChange={(e) =>
+                          setConfigs({
+                            ...configs,
+                            google_client_secret: e.target.value,
+                          })
+                        }
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setShowClientSecret((v) => !v)}
+                        aria-label={
+                          showClientSecret
+                            ? "Hide client secret"
+                            : "Show client secret"
+                        }
+                        className="px-3 py-2 rounded-lg border border-slate-300 bg-slate-50 hover:bg-slate-100 text-slate-600 cursor-pointer"
+                      >
+                        {showClientSecret ? (
+                          <EyeOff className="w-4 h-4" />
+                        ) : (
+                          <Eye className="w-4 h-4" />
+                        )}
+                      </button>
+                    </div>
+                    {configs.google_client_secret.includes(
+                      ".apps.googleusercontent.com"
+                    ) && (
+                      <p className="text-xs text-red-600 mt-1 mb-0">
+                        This looks like your Client ID. Paste your Client Secret
+                        (starts with GOCSPX-) here instead.
+                      </p>
+                    )}
                   </div>
 
                   <div>

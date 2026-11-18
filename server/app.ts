@@ -190,9 +190,20 @@ export function createApiApp() {
   });
 
   // OAuth helpers
-  app.post("/api/oauth/url", (_req, res) => {
+  app.post("/api/oauth/url", (req, res) => {
     try {
+      const body = req.body ?? {};
+      if (typeof body.google_client_id === "string" && body.google_client_id.trim()) {
+        DatabaseService.setConfig("google_client_id", body.google_client_id.trim());
+      }
+      if (typeof body.google_client_secret === "string" && body.google_client_secret.trim()) {
+        DatabaseService.setConfig("google_client_secret", body.google_client_secret.trim());
+      }
+      if (typeof body.google_redirect_uri === "string" && body.google_redirect_uri.trim()) {
+        DatabaseService.setConfig("google_redirect_uri", body.google_redirect_uri.trim());
+      }
       const { url } = GoogleOAuthService.generateAuthorizationUrl();
+      commitSessionCookie(req, res);
       res.json({ url });
     } catch (err) {
       res.status(400).json({
@@ -202,11 +213,21 @@ export function createApiApp() {
   });
 
   app.post("/api/oauth/exchange", async (req, res) => {
-    const code = typeof req.body?.code === "string" ? req.body.code.trim() : "";
+    const body = req.body ?? {};
+    const code = typeof body.code === "string" ? body.code.trim() : "";
     if (!code) {
       return res
         .status(400)
         .json({ error: "Please enter the authorization code." });
+    }
+    if (typeof body.google_client_id === "string" && body.google_client_id.trim()) {
+      DatabaseService.setConfig("google_client_id", body.google_client_id.trim());
+    }
+    if (typeof body.google_client_secret === "string" && body.google_client_secret.trim()) {
+      DatabaseService.setConfig("google_client_secret", body.google_client_secret.trim());
+    }
+    if (typeof body.google_redirect_uri === "string" && body.google_redirect_uri.trim()) {
+      DatabaseService.setConfig("google_redirect_uri", body.google_redirect_uri.trim());
     }
     try {
       await GoogleOAuthService.exchangeCodeForTokens(code);
