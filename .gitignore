@@ -1,10 +1,6 @@
-__pycache__/
-*.py[cod]
-*$py.class
-.pytest_cache/
+node_modules/
+dist/
+.vercel/
 .env
-.credentials.enc
-.token_secret.key
+.env.local
 *.log
-data/*.db
-data/app.db
