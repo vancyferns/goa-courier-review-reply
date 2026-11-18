@@ -1,3 +1,5 @@
+import { getSessionConfig, setSessionConfig } from "./session.ts";
+
 export interface ExistingReply {
   comment: string;
   update_time: string;
@@ -184,6 +186,10 @@ let nextAuditId = 2;
 
 export const DatabaseService = {
   getConfig(key: string, defaultVal = ""): string {
+    const sessionVal = getSessionConfig(key);
+    if (sessionVal !== undefined && sessionVal !== "") {
+      return sessionVal;
+    }
     const val = configStore.get(key);
     if (val !== undefined && val !== "") {
       return val;
@@ -197,6 +203,7 @@ export const DatabaseService = {
 
   setConfig(key: string, value: string): void {
     configStore.set(key, value);
+    setSessionConfig(key, value);
   },
 
   getAllConfigs(): Record<string, string> {

@@ -7,14 +7,17 @@ import {
   OutputValidator,
   generateDraftForReview,
 } from "./services.ts";
+import { commitSessionCookie, sessionMiddleware } from "./session.ts";
 
 export function createApiApp() {
   const app = express();
   app.use(express.json());
+  app.use(sessionMiddleware);
 
   // Bootstrap endpoint
-  app.get("/api/bootstrap", async (_req, res) => {
+  app.get("/api/bootstrap", async (req, res) => {
     const isConnected = await GoogleOAuthService.isConnected();
+    commitSessionCookie(req, res);
     res.json({
       isConnected,
       modelDisplayName: MODEL_CONFIG.display_name,
@@ -39,9 +42,10 @@ export function createApiApp() {
   });
 
   // Sync live reviews from Google Business Profile
-  app.post("/api/reviews/sync", async (_req, res) => {
+  app.post("/api/reviews/sync", async (req, res) => {
     try {
       const syncResult = await GoogleBusinessProfileClient.syncAllReviews();
+      commitSessionCookie(req, res);
       return res.json({
         success: true,
         ...syncResult,
@@ -177,6 +181,7 @@ export function createApiApp() {
       "SUCCESS",
       "All system configurations saved to store."
     );
+    commitSessionCookie(req, res);
     res.json({
       success: true,
       message: "All configurations successfully saved!",
@@ -222,6 +227,7 @@ export function createApiApp() {
         }`;
       }
 
+      commitSessionCookie(req, res);
       return res.json({
         success: true,
         isConnected: true,

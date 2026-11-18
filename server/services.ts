@@ -5,6 +5,11 @@ import {
   selectSeoPhrases,
 } from "./config.ts";
 import { AppSecrets, DatabaseService, ReviewRecord } from "./db.ts";
+import {
+  getSessionTokens,
+  setSessionTokens,
+  type TokenPayload,
+} from "./session.ts";
 
 const FORBIDDEN_PROMISES = [
   /\brefund\b/i,
@@ -441,15 +446,17 @@ export async function generateDraftForReview(review: ReviewRecord): Promise<{
   return { draft, isValid, issues, stats };
 }
 
-// In-memory OAuth token store
-interface TokenPayload {
-  access_token: string;
-  refresh_token?: string;
-  expires_in?: number;
-  expires_at: number;
+// In-memory + session-cookie OAuth token store
+let storedTokens: TokenPayload | null = null;
+
+function readTokens(): TokenPayload | null {
+  return getSessionTokens() ?? storedTokens;
 }
 
-let storedTokens: TokenPayload | null = null;
+function saveTokens(tokens: TokenPayload): void {
+  storedTokens = tokens;
+  setSessionTokens(tokens);
+}
 
 const AUTH_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth";
 const TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token";
@@ -509,15 +516,16 @@ export const GoogleOAuthService = {
       throw new Error(`Token exchange failed: ${await resp.text()}`);
     }
 
+    const existing = readTokens();
     const data: any = await resp.json();
     const expiresIn = data.expires_in ?? 3600;
     const tokenObj: TokenPayload = {
       ...data,
       expires_at: Date.now() / 1000 + expiresIn,
-      refresh_token: data.refresh_token || storedTokens?.refresh_token,
+      refresh_token: data.refresh_token || existing?.refresh_token,
     };
 
-    storedTokens = tokenObj;
+    saveTokens(tokenObj);
     return tokenObj;
   },
 
@@ -548,22 +556,23 @@ export const GoogleOAuthService = {
       refresh_token: refreshToken,
       expires_at: Date.now() / 1000 + (data.expires_in ?? 3600),
     };
-    storedTokens = tokenObj;
+    saveTokens(tokenObj);
     return tokenObj;
   },
 
   async getValidAccessToken(): Promise<string | null> {
-    if (!storedTokens?.access_token) {
+    const current = readTokens();
+    if (!current?.access_token) {
       return null;
     }
-    if (Date.now() / 1000 >= storedTokens.expires_at - 60) {
-      if (!storedTokens.refresh_token) return null;
+    if (Date.now() / 1000 >= current.expires_at - 60) {
+      if (!current.refresh_token) return null;
       const refreshed = await GoogleOAuthService.refreshAccessToken(
-        storedTokens.refresh_token
+        current.refresh_token
       );
       return refreshed.access_token ?? null;
     }
-    return storedTokens.access_token;
+    return current.access_token;
   },
 
   async isConnected(): Promise<boolean> {
