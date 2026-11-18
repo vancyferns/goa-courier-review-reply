@@ -14,12 +14,24 @@ export function createApiApp() {
   app.use(express.json());
   app.use(sessionMiddleware);
 
-  // Bootstrap endpoint
+  // Bootstrap endpoint (auto-syncs live GBP reviews when authorized)
   app.get("/api/bootstrap", async (req, res) => {
     const isConnected = await GoogleOAuthService.isConnected();
+    let syncError: string | null = null;
+
+    if (isConnected) {
+      try {
+        await GoogleBusinessProfileClient.syncAllReviews();
+      } catch (err) {
+        syncError = err instanceof Error ? err.message : String(err);
+        DatabaseService.logAudit("GBP_SYNC", null, "ERROR", syncError);
+      }
+    }
+
     commitSessionCookie(req, res);
     res.json({
       isConnected,
+      syncError,
       modelDisplayName: MODEL_CONFIG.display_name,
       modelRepoId: MODEL_CONFIG.repo_id,
       locations: DatabaseService.getLocations().map((l) => l.location_name),
@@ -28,14 +40,27 @@ export function createApiApp() {
     });
   });
 
-  // Reviews list with filtering
-  app.get("/api/reviews", (req, res) => {
+  // Reviews list with filtering (auto-hydrates cold serverless instances when connected)
+  app.get("/api/reviews", async (req, res) => {
     const location = String(req.query.location || "All Locations");
     const status = String(req.query.status || "All");
     const search = String(req.query.search || "");
+    let syncError: string | null = null;
+
+    if (!DatabaseService.hasReviews() && (await GoogleOAuthService.isConnected())) {
+      try {
+        await GoogleBusinessProfileClient.syncAllReviews();
+      } catch (err) {
+        syncError = err instanceof Error ? err.message : String(err);
+        DatabaseService.logAudit("GBP_SYNC", null, "ERROR", syncError);
+      }
+    }
+
+    commitSessionCookie(req, res);
     const reviews = DatabaseService.getReviews(location, status, search);
     res.json({
       reviews,
+      syncError,
       kpis: DatabaseService.getKpis(),
       locations: DatabaseService.getLocations().map((l) => l.location_name),
     });
@@ -43,13 +68,16 @@ export function createApiApp() {
 
   // Sync live reviews from Google Business Profile
   app.post("/api/reviews/sync", async (req, res) => {
+    const location = String(req.body?.location || req.query.location || "All Locations");
+    const status = String(req.body?.status || req.query.status || "All");
+    const search = String(req.body?.search || req.query.search || "");
     try {
       const syncResult = await GoogleBusinessProfileClient.syncAllReviews();
       commitSessionCookie(req, res);
       return res.json({
         success: true,
         ...syncResult,
-        reviews: DatabaseService.getReviews(),
+        reviews: DatabaseService.getReviews(location, status, search),
         kpis: DatabaseService.getKpis(),
         locations: DatabaseService.getLocations().map((l) => l.location_name),
       });
@@ -71,12 +99,24 @@ export function createApiApp() {
 
   // Generate AI draft reply
   app.post("/api/reviews/:id/draft", async (req, res) => {
-    const review = DatabaseService.getReviewById(req.params.id);
+    let review = DatabaseService.getReviewById(req.params.id);
+    if (!review && req.body?.review && req.body.review.id === req.params.id) {
+      review = DatabaseService.upsertReview(req.body.review);
+    }
+    if (!review && (await GoogleOAuthService.isConnected())) {
+      try {
+        await GoogleBusinessProfileClient.syncAllReviews();
+        review = DatabaseService.getReviewById(req.params.id);
+      } catch {
+        // handled below as 404
+      }
+    }
     if (!review) {
       return res.status(404).json({ error: "Review not found." });
     }
     try {
       const result = await generateDraftForReview(review);
+      commitSessionCookie(req, res);
       return res.json(result);
     } catch (err) {
       return res.status(500).json({
@@ -95,7 +135,7 @@ export function createApiApp() {
 
   // Publish reply
   app.post("/api/reviews/:id/publish", async (req, res) => {
-    const { replyText, confirmed } = req.body ?? {};
+    const { replyText, confirmed, review: reviewSnapshot } = req.body ?? {};
     if (!confirmed) {
       return res.status(400).json({
         error: "Publish aborted: Confirmation checkbox must be checked.",
@@ -107,7 +147,18 @@ export function createApiApp() {
       });
     }
 
-    const review = DatabaseService.getReviewById(req.params.id);
+    let review = DatabaseService.getReviewById(req.params.id);
+    if (!review && reviewSnapshot && reviewSnapshot.id === req.params.id) {
+      review = DatabaseService.upsertReview(reviewSnapshot);
+    }
+    if (!review && (await GoogleOAuthService.isConnected())) {
+      try {
+        await GoogleBusinessProfileClient.syncAllReviews();
+        review = DatabaseService.getReviewById(req.params.id);
+      } catch {
+        // handled below as 404
+      }
+    }
     if (!review) {
       return res.status(404).json({ error: "Review not found." });
     }
@@ -120,19 +171,25 @@ export function createApiApp() {
 
     try {
       const token = await GoogleOAuthService.getValidAccessToken();
-      if (token && review.resource_name) {
-        await GoogleBusinessProfileClient.publishReply(
-          review.resource_name,
-          replyText,
-          token
-        );
+      if (!token || !review.resource_name) {
+        return res.status(400).json({
+          error:
+            "Cannot publish: Google Business Profile OAuth connection and live review resource name are required.",
+        });
       }
+
+      await GoogleBusinessProfileClient.publishReply(
+        review.resource_name,
+        replyText,
+        token
+      );
 
       const success = DatabaseService.publishReply(review.id, replyText);
       if (!success) {
         return res.status(500).json({ error: "Failed to publish reply." });
       }
 
+      commitSessionCookie(req, res);
       const updatedReview = DatabaseService.getReviewById(review.id);
       return res.json({
         success: true,
@@ -239,19 +296,22 @@ export function createApiApp() {
       );
 
       let syncMessage = "";
+      let syncError: string | null = null;
       try {
         const syncRes = await GoogleBusinessProfileClient.syncAllReviews();
         syncMessage = ` Fetched ${syncRes.reviewsCount} live review(s) across ${syncRes.locationsCount} location(s).`;
       } catch (syncErr) {
-        syncMessage = ` Connected, but review sync returned: ${
-          syncErr instanceof Error ? syncErr.message : String(syncErr)
-        }`;
+        syncError =
+          syncErr instanceof Error ? syncErr.message : String(syncErr);
+        DatabaseService.logAudit("GBP_SYNC", null, "ERROR", syncError);
+        syncMessage = ` Connected, but review sync returned: ${syncError}`;
       }
 
       commitSessionCookie(req, res);
       return res.json({
         success: true,
         isConnected: true,
+        syncError,
         message: `Successfully connected to Google Business Profile!${syncMessage}`,
         reviews: DatabaseService.getReviews(),
         kpis: DatabaseService.getKpis(),

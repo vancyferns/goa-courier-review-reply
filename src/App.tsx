@@ -97,17 +97,12 @@ export default function App() {
   const [modelDisplayName, setModelDisplayName] = useState(
     "Qwen3-4B-Instruct-2507"
   );
-  const [locations, setLocations] = useState<string[]>([
-    "Margao – Head Office",
-    "Agassaim",
-    "Porvorim",
-    "Canacona",
-  ]);
+  const [locations, setLocations] = useState<string[]>([]);
   const [kpis, setKpis] = useState<Kpis>({
     total: 0,
     unanswered: 0,
     replied: 0,
-    avg_rating: 5.0,
+    avg_rating: 0,
   });
 
   // Workstation state
@@ -116,8 +111,10 @@ export default function App() {
   const [locFilter, setLocFilter] = useState("All Locations");
   const [statusFilter, setStatusFilter] = useState("All");
   const [searchQuery, setSearchQuery] = useState("");
+  const [isBootstrapping, setIsBootstrapping] = useState(true);
   const [isSyncing, setIsSyncing] = useState(false);
   const [syncNotice, setSyncNotice] = useState("");
+  const [syncError, setSyncError] = useState<string | null>(null);
 
   const [draftText, setDraftText] = useState("");
   const [originalDraft, setOriginalDraft] = useState("");
@@ -197,35 +194,46 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    setIsBootstrapping(true);
     fetch("/api/bootstrap")
       .then((r) => r.json())
       .then((data: BootstrapData) => {
-        setIsConnected(data.isConnected);
+        setIsConnected(Boolean(data.isConnected));
+        setSyncError(data.syncError ?? null);
         setModelDisplayName(data.modelDisplayName);
-        setLocations(data.locations);
+        setLocations(data.locations ?? []);
         setKpis(data.kpis);
-        setReviews(data.reviews);
-        if (data.reviews.length > 0) {
+        setReviews(data.reviews ?? []);
+        if (data.reviews && data.reviews.length > 0) {
           selectReview(data.reviews[0]);
+        } else {
+          selectReview(null);
         }
       })
-      .catch((err) => console.error("Failed to bootstrap:", err));
+      .catch((err) => {
+        console.error("Failed to bootstrap:", err);
+        setSyncError(
+          err instanceof Error ? err.message : "Failed to load reviews."
+        );
+      })
+      .finally(() => setIsBootstrapping(false));
   }, [selectReview]);
 
-  const fetchFilteredReviews = useCallback(
-    async (loc = locFilter, stat = statusFilter, search = searchQuery) => {
-      const params = new URLSearchParams({
-        location: loc,
-        status: stat,
-        search,
-      });
-      const resp = await fetch(`/api/reviews?${params.toString()}`);
-      const data = await resp.json();
+  const applyReviewListResponse = useCallback(
+    (data: {
+      reviews?: ReviewRecord[];
+      kpis?: Kpis;
+      locations?: string[];
+      syncError?: string | null;
+    }) => {
       const list: ReviewRecord[] = data.reviews ?? [];
       setReviews(list);
       if (data.kpis) setKpis(data.kpis);
-      if (Array.isArray(data.locations) && data.locations.length > 0) {
+      if (Array.isArray(data.locations)) {
         setLocations(data.locations);
+      }
+      if (data.syncError !== undefined) {
+        setSyncError(data.syncError);
       }
 
       setSelectedReviewId((prevId) => {
@@ -250,35 +258,62 @@ export default function App() {
         return null;
       });
     },
-    [locFilter, statusFilter, searchQuery]
+    []
+  );
+
+  const fetchFilteredReviews = useCallback(
+    async (loc = locFilter, stat = statusFilter, search = searchQuery) => {
+      const params = new URLSearchParams({
+        location: loc,
+        status: stat,
+        search,
+      });
+      const resp = await fetch(`/api/reviews?${params.toString()}`);
+      const data = await resp.json();
+      applyReviewListResponse(data);
+    },
+    [locFilter, statusFilter, searchQuery, applyReviewListResponse]
   );
 
   const handleRefreshReviews = async () => {
     setSyncNotice("");
-    if (isConnected) {
-      setIsSyncing(true);
-      try {
-        const resp = await fetch("/api/reviews/sync", { method: "POST" });
-        const data = await resp.json();
-        if (resp.ok && data.success) {
-          setSyncNotice(
-            `Synced ${data.reviewsCount} live review(s) across ${data.locationsCount} location(s).`
-          );
-          if (Array.isArray(data.locations) && data.locations.length > 0) {
-            setLocations(data.locations);
-          }
-        } else {
-          setSyncNotice(data.error || "Sync failed.");
-        }
-      } catch (err) {
-        setSyncNotice(
-          err instanceof Error ? err.message : "Failed to sync from Google."
-        );
-      } finally {
-        setIsSyncing(false);
-      }
+    setSyncError(null);
+    if (!isConnected) {
+      setActiveTab("config");
+      return;
     }
-    await fetchFilteredReviews();
+    setIsSyncing(true);
+    try {
+      const resp = await fetch("/api/reviews/sync", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          location: locFilter,
+          status: statusFilter,
+          search: searchQuery,
+        }),
+      });
+      const data = await resp.json();
+      if (resp.ok && data.success) {
+        setSyncNotice(
+          `Synced ${data.reviewsCount} live review(s) across ${data.locationsCount} location(s).`
+        );
+        applyReviewListResponse({
+          reviews: data.reviews,
+          kpis: data.kpis,
+          locations: data.locations,
+          syncError: null,
+        });
+      } else {
+        setSyncError(data.error || "Sync failed.");
+      }
+    } catch (err) {
+      setSyncError(
+        err instanceof Error ? err.message : "Failed to sync from Google."
+      );
+    } finally {
+      setIsSyncing(false);
+    }
   };
 
   useEffect(() => {
@@ -329,13 +364,15 @@ export default function App() {
   };
 
   const handleGenerateDraft = async () => {
-    if (!selectedReviewId) return;
+    if (!selectedReviewId || !selectedReview) return;
     setIsGenerating(true);
     setResetNotice("");
     setPublishResult(null);
     try {
       const resp = await fetch(`/api/reviews/${selectedReviewId}/draft`, {
         method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ review: selectedReview }),
       });
       const data = await resp.json();
       if (resp.ok) {
@@ -405,7 +442,11 @@ export default function App() {
       const resp = await fetch(`/api/reviews/${selectedReviewId}/publish`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ replyText: draftText, confirmed }),
+        body: JSON.stringify({
+          replyText: draftText,
+          confirmed,
+          review: selectedReview,
+        }),
       });
       const data = await resp.json();
       if (resp.ok && data.success) {
@@ -414,7 +455,14 @@ export default function App() {
           text: data.message,
         });
         if (data.kpis) setKpis(data.kpis);
-        await fetchFilteredReviews();
+        if (data.review) {
+          setReviews((prev) =>
+            prev.map((item) => (item.id === data.review.id ? data.review : item))
+          );
+          selectReview(data.review);
+        } else {
+          await fetchFilteredReviews();
+        }
       } else {
         setPublishResult({
           type: resp.status === 409 ? "warn" : "err",
@@ -515,7 +563,8 @@ export default function App() {
       const data = await resp.json();
       if (resp.ok && data.success) {
         setIsConnected(true);
-        if (Array.isArray(data.locations) && data.locations.length > 0) {
+        setSyncError(data.syncError ?? null);
+        if (Array.isArray(data.locations)) {
           setLocations(data.locations);
         }
         if (data.kpis) setKpis(data.kpis);
@@ -524,7 +573,7 @@ export default function App() {
           selectReview(data.reviews[0] ?? null);
         }
         setOauthStatus({
-          type: "ok",
+          type: data.syncError ? "err" : "ok",
           text: data.message,
         });
       } else {
@@ -649,7 +698,7 @@ export default function App() {
           <div className="flex items-center gap-5 flex-wrap text-xs font-medium text-slate-600">
             <span className="inline-flex items-center gap-1.5 whitespace-nowrap">
               <Database className="w-3.5 h-3.5 text-emerald-600" />
-              <span>In-Memory Store Active</span>
+              <span>{isConnected ? "Live Google GBP Sync" : "Live-Only Mode"}</span>
             </span>
 
             <span className="text-slate-300 hidden sm:inline" aria-hidden="true">
@@ -669,7 +718,7 @@ export default function App() {
               <span>
                 {isConnected
                   ? "Google GBP: Connected"
-                  : "Google GBP: Standby (Local Mode)"}
+                  : "Google GBP: Not Connected"}
               </span>
             </span>
 
@@ -759,7 +808,7 @@ export default function App() {
                         Average Score
                       </div>
                       <div className="font-display text-2xl font-bold text-violet-700 tabular-nums mt-0.5 flex items-center gap-1">
-                        <span>{kpis.avg_rating}</span>
+                        <span>{kpis.total > 0 ? kpis.avg_rating : "—"}</span>
                         <Star className="w-5 h-5 fill-violet-600 text-violet-600" />
                       </div>
                     </div>
@@ -889,9 +938,44 @@ export default function App() {
 
                   {/* Queue Items */}
                   <div className="pt-4 space-y-2.5 max-h-[620px] overflow-y-auto pr-0.5">
-                    {reviews.length === 0 && (
+                    {isBootstrapping && (
                       <div className="py-8 text-center text-sm text-slate-500">
-                        No reviews match the current filter criteria.
+                        Loading live Google Business Profile reviews...
+                      </div>
+                    )}
+                    {!isBootstrapping && syncError && (
+                      <div className="rounded-xl border border-red-200 bg-red-50 p-4 text-xs text-red-700 space-y-2">
+                        <div className="flex items-start gap-2 font-semibold">
+                          <XCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                          <span>Google Business Profile Sync Error</span>
+                        </div>
+                        <p className="m-0 leading-relaxed break-words">
+                          {syncError}
+                        </p>
+                      </div>
+                    )}
+                    {!isBootstrapping && reviews.length === 0 && !syncError && (
+                      <div className="py-8 px-4 text-center space-y-3">
+                        {!isConnected ? (
+                          <>
+                            <p className="text-sm text-slate-600 m-0">
+                              Connect your Google Business Profile account to fetch live customer reviews.
+                            </p>
+                            <button
+                              type="button"
+                              onClick={() => setActiveTab("config")}
+                              className="px-4 py-2 rounded-lg bg-[#155eef] hover:bg-[#0d47d1] text-white text-xs font-semibold cursor-pointer transition-colors"
+                            >
+                              Connect Google Business Profile
+                            </button>
+                          </>
+                        ) : (
+                          <p className="text-sm text-slate-500 m-0">
+                            {kpis.total === 0
+                              ? "Connected to Google Business Profile, but no reviews were found for your locations."
+                              : "No reviews match the current filter criteria."}
+                          </p>
+                        )}
                       </div>
                     )}
                     {reviews.map((r) => {

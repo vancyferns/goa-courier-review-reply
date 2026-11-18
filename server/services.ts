@@ -631,38 +631,86 @@ function normalizeGbpReview(
 }
 
 export const GoogleBusinessProfileClient = {
-  async listAccounts(accessToken: string): Promise<Array<{ name: string; accountName?: string }>> {
-    const resp = await fetch(GBP_ACCOUNT_URL, {
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        "Content-Type": "application/json",
-      },
-      signal: AbortSignal.timeout(30000),
-    });
-    if (!resp.ok) {
-      throw new Error(`Failed to list accounts (${resp.status}): ${await resp.text()}`);
-    }
-    const data: any = await resp.json();
-    return data.accounts ?? [];
+  async listAccounts(
+    accessToken: string
+  ): Promise<Array<{ name: string; accountName?: string }>> {
+    const accounts: Array<{ name: string; accountName?: string }> = [];
+    let pageToken: string | undefined = undefined;
+
+    do {
+      const params = new URLSearchParams();
+      if (pageToken) params.set("pageToken", pageToken);
+      const url = params.toString()
+        ? `${GBP_ACCOUNT_URL}?${params.toString()}`
+        : GBP_ACCOUNT_URL;
+
+      const resp = await fetch(url, {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          "Content-Type": "application/json",
+        },
+        signal: AbortSignal.timeout(30000),
+      });
+      if (!resp.ok) {
+        throw new Error(
+          `Failed to list accounts (${resp.status}): ${await resp.text()}`
+        );
+      }
+      const data: any = await resp.json();
+      if (Array.isArray(data.accounts)) {
+        accounts.push(...data.accounts);
+      }
+      pageToken = data.nextPageToken;
+    } while (pageToken);
+
+    return accounts;
   },
 
   async listLocations(
     accountName: string,
     accessToken: string
-  ): Promise<Array<{ name: string; title?: string }>> {
-    const url = `${GBP_BUSINESS_INFO_URL}/${accountName}/locations?readMask=name,title,storefrontAddress`;
-    const resp = await fetch(url, {
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        "Content-Type": "application/json",
-      },
-      signal: AbortSignal.timeout(30000),
-    });
-    if (!resp.ok) {
-      throw new Error(`Failed to list locations (${resp.status}): ${await resp.text()}`);
-    }
-    const data: any = await resp.json();
-    return data.locations ?? [];
+  ): Promise<
+    Array<{
+      name: string;
+      title?: string;
+      storefrontAddress?: { locality?: string };
+    }>
+  > {
+    const locations: Array<{
+      name: string;
+      title?: string;
+      storefrontAddress?: { locality?: string };
+    }> = [];
+    let pageToken: string | undefined = undefined;
+
+    do {
+      const params = new URLSearchParams({
+        readMask: "name,title,storefrontAddress",
+        pageSize: "100",
+      });
+      if (pageToken) params.set("pageToken", pageToken);
+      const url = `${GBP_BUSINESS_INFO_URL}/${accountName}/locations?${params.toString()}`;
+
+      const resp = await fetch(url, {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          "Content-Type": "application/json",
+        },
+        signal: AbortSignal.timeout(30000),
+      });
+      if (!resp.ok) {
+        throw new Error(
+          `Failed to list locations (${resp.status}): ${await resp.text()}`
+        );
+      }
+      const data: any = await resp.json();
+      if (Array.isArray(data.locations)) {
+        locations.push(...data.locations);
+      }
+      pageToken = data.nextPageToken;
+    } while (pageToken);
+
+    return locations;
   },
 
   async listReviews(
@@ -720,7 +768,12 @@ export const GoogleBusinessProfileClient = {
         const v4LocationName = loc.name.startsWith("accounts/")
           ? loc.name
           : `${accountName}/${loc.name}`;
-        const label = loc.title || loc.name;
+        const locality = loc.storefrontAddress?.locality?.trim();
+        const baseTitle = loc.title?.trim() || loc.name;
+        const label =
+          locality && !baseTitle.toLowerCase().includes(locality.toLowerCase())
+            ? `${baseTitle} — ${locality}`
+            : baseTitle;
         if (!discoveredLocations.includes(label)) {
           discoveredLocations.push(label);
         }
@@ -744,7 +797,7 @@ export const GoogleBusinessProfileClient = {
       "GBP_SYNC",
       null,
       "SUCCESS",
-      `Synced ${allReviews.length} review(s) across ${discoveredLocations.length} Google Business location(s).`
+      `Synced ${allReviews.length} live review(s) across ${discoveredLocations.length} Google Business location(s) from ${accounts.length} account(s).`
     );
 
     return {

@@ -57,6 +57,7 @@ export interface SystemConfig {
 
 export interface BootstrapData {
   isConnected: boolean;
+  syncError?: string | null;
   modelDisplayName: string;
   modelRepoId: string;
   locations: string[];
