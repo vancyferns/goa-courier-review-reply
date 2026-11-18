@@ -1,4 +1,9 @@
 import express from "express";
+import {
+  type DateRangeFilter,
+  computeBusinessAnalytics,
+  filterReviewsForAnalytics,
+} from "../src/analytics.ts";
 import { MODEL_CONFIG } from "./config.ts";
 import { DatabaseService } from "./db.ts";
 import {
@@ -78,6 +83,7 @@ export function createApiApp() {
         success: true,
         ...syncResult,
         reviews: DatabaseService.getReviews(location, status, search),
+        allReviews: DatabaseService.getReviews(),
         kpis: DatabaseService.getKpis(),
         locations: DatabaseService.getLocations().map((l) => l.location_name),
       });
@@ -86,6 +92,35 @@ export function createApiApp() {
       DatabaseService.logAudit("GBP_SYNC", null, "ERROR", msg);
       return res.status(400).json({ error: msg });
     }
+  });
+
+  // Business growth analytics endpoint
+  app.get("/api/analytics", async (req, res) => {
+    const location = String(req.query.location || "All Locations");
+    const rawRange = String(req.query.range || "all");
+    const range: DateRangeFilter =
+      rawRange === "30d" || rawRange === "90d" || rawRange === "365d"
+        ? rawRange
+        : "all";
+
+    if (!DatabaseService.hasReviews() && (await GoogleOAuthService.isConnected())) {
+      try {
+        await GoogleBusinessProfileClient.syncAllReviews();
+      } catch {
+        // surface whatever reviews exist
+      }
+    }
+
+    commitSessionCookie(req, res);
+    const scoped = filterReviewsForAnalytics(
+      DatabaseService.getReviews(),
+      location,
+      range
+    );
+    return res.json({
+      analytics: computeBusinessAnalytics(scoped),
+      locations: DatabaseService.getLocations().map((l) => l.location_name),
+    });
   });
 
   // Single review

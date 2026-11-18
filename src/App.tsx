@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useState } from "react";
 import {
   AlertCircle,
   AlertTriangle,
+  BarChart3,
   Bot,
   Building2,
   Calendar,
@@ -33,6 +34,7 @@ import {
   Tag,
   XCircle,
 } from "lucide-react";
+import { GrowthAnalyticsView } from "./components/GrowthAnalyticsView";
 import type {
   AuditLogRecord,
   BootstrapData,
@@ -42,7 +44,7 @@ import type {
   ValidationStats,
 } from "./types";
 
-type ActiveTab = "workstation" | "config" | "audit";
+type ActiveTab = "workstation" | "analytics" | "config" | "audit";
 
 const EMPTY_STATS: ValidationStats = {
   word_count: 0,
@@ -105,7 +107,8 @@ export default function App() {
     avg_rating: 0,
   });
 
-  // Workstation state
+  // Workstation & Analytics state
+  const [allReviews, setAllReviews] = useState<ReviewRecord[]>([]);
   const [reviews, setReviews] = useState<ReviewRecord[]>([]);
   const [selectedReviewId, setSelectedReviewId] = useState<string | null>(null);
   const [locFilter, setLocFilter] = useState("All Locations");
@@ -203,9 +206,11 @@ export default function App() {
         setModelDisplayName(data.modelDisplayName);
         setLocations(data.locations ?? []);
         setKpis(data.kpis);
-        setReviews(data.reviews ?? []);
-        if (data.reviews && data.reviews.length > 0) {
-          selectReview(data.reviews[0]);
+        const list = data.reviews ?? [];
+        setAllReviews(list);
+        setReviews(list);
+        if (list.length > 0) {
+          selectReview(list[0]);
         } else {
           selectReview(null);
         }
@@ -222,12 +227,16 @@ export default function App() {
   const applyReviewListResponse = useCallback(
     (data: {
       reviews?: ReviewRecord[];
+      allReviews?: ReviewRecord[];
       kpis?: Kpis;
       locations?: string[];
       syncError?: string | null;
     }) => {
       const list: ReviewRecord[] = data.reviews ?? [];
       setReviews(list);
+      if (Array.isArray(data.allReviews)) {
+        setAllReviews(data.allReviews);
+      }
       if (data.kpis) setKpis(data.kpis);
       if (Array.isArray(data.locations)) {
         setLocations(data.locations);
@@ -261,8 +270,47 @@ export default function App() {
     []
   );
 
+  const filterLocalReviews = useCallback(
+    (source: ReviewRecord[], loc: string, stat: string, search: string) => {
+      const q = (search || "").trim().toLowerCase();
+      const l = (loc || "").trim().toLowerCase();
+      const s = (stat || "").trim().toLowerCase();
+      return source
+        .filter((r) => {
+          if (l && l !== "all locations" && !r.location.toLowerCase().includes(l)) {
+            return false;
+          }
+          if (s && s !== "all" && r.reply_status !== s) {
+            return false;
+          }
+          if (q) {
+            const hit =
+              (r.reviewer_name || "").toLowerCase().includes(q) ||
+              (r.comment || "").toLowerCase().includes(q) ||
+              (r.location || "").toLowerCase().includes(q);
+            if (!hit) return false;
+          }
+          return true;
+        })
+        .slice()
+        .sort((a, b) => {
+          const aRank = a.reply_status === "unanswered" ? 0 : 1;
+          const bRank = b.reply_status === "unanswered" ? 0 : 1;
+          if (aRank !== bRank) return aRank - bRank;
+          return b.created_date.localeCompare(a.created_date);
+        });
+    },
+    []
+  );
+
   const fetchFilteredReviews = useCallback(
     async (loc = locFilter, stat = statusFilter, search = searchQuery) => {
+      if (allReviews.length > 0) {
+        applyReviewListResponse({
+          reviews: filterLocalReviews(allReviews, loc, stat, search),
+        });
+        return;
+      }
       const params = new URLSearchParams({
         location: loc,
         status: stat,
@@ -272,7 +320,30 @@ export default function App() {
       const data = await resp.json();
       applyReviewListResponse(data);
     },
-    [locFilter, statusFilter, searchQuery, applyReviewListResponse]
+    [
+      locFilter,
+      statusFilter,
+      searchQuery,
+      allReviews,
+      filterLocalReviews,
+      applyReviewListResponse,
+    ]
+  );
+
+  const handleDrillDownToWorkstation = useCallback(
+    (filters: { location?: string; status?: string; search?: string }) => {
+      const nextLoc = filters.location ?? "All Locations";
+      const nextStatus = filters.status ?? "All";
+      const nextSearch = filters.search ?? "";
+      setLocFilter(nextLoc);
+      setStatusFilter(nextStatus);
+      setSearchQuery(nextSearch);
+      setActiveTab("workstation");
+      applyReviewListResponse({
+        reviews: filterLocalReviews(allReviews, nextLoc, nextStatus, nextSearch),
+      });
+    },
+    [allReviews, filterLocalReviews, applyReviewListResponse]
   );
 
   const handleRefreshReviews = async () => {
@@ -300,6 +371,7 @@ export default function App() {
         );
         applyReviewListResponse({
           reviews: data.reviews,
+          allReviews: data.allReviews ?? data.reviews,
           kpis: data.kpis,
           locations: data.locations,
           syncError: null,
@@ -456,6 +528,9 @@ export default function App() {
         });
         if (data.kpis) setKpis(data.kpis);
         if (data.review) {
+          setAllReviews((prev) =>
+            prev.map((item) => (item.id === data.review.id ? data.review : item))
+          );
           setReviews((prev) =>
             prev.map((item) => (item.id === data.review.id ? data.review : item))
           );
@@ -569,6 +644,7 @@ export default function App() {
         }
         if (data.kpis) setKpis(data.kpis);
         if (Array.isArray(data.reviews)) {
+          setAllReviews(data.reviews);
           setReviews(data.reviews);
           selectReview(data.reviews[0] ?? null);
         }
@@ -636,6 +712,19 @@ export default function App() {
             >
               <Home className="w-4 h-4 shrink-0" />
               <span>Review Workstation</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setActiveTab("analytics")}
+              className={`flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-sm font-medium whitespace-nowrap shrink-0 transition-colors cursor-pointer ${
+                activeTab === "analytics"
+                  ? "bg-[#155eef] text-white shadow-sm"
+                  : "text-blue-100/80 hover:bg-white/10 hover:text-white"
+              }`}
+            >
+              <BarChart3 className="w-4 h-4 shrink-0" />
+              <span>Growth Analytics</span>
             </button>
 
             <button
@@ -908,25 +997,45 @@ export default function App() {
                     </div>
 
                     <div className="flex items-center justify-between gap-3 flex-wrap">
-                      <button
-                        type="button"
-                        disabled={isSyncing}
-                        onClick={handleRefreshReviews}
-                        className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg border border-slate-300 bg-slate-50 hover:bg-slate-100 text-xs font-semibold text-slate-700 whitespace-nowrap cursor-pointer transition-colors disabled:opacity-50"
-                      >
-                        <RefreshCw
-                          className={`w-3.5 h-3.5 ${
-                            isSyncing ? "animate-spin" : ""
-                          }`}
-                        />
-                        <span>
-                          {isSyncing
-                            ? "Syncing from Google..."
-                            : isConnected
-                            ? "Sync Google Reviews"
-                            : "Refresh Reviews"}
-                        </span>
-                      </button>
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <button
+                          type="button"
+                          disabled={isSyncing}
+                          onClick={handleRefreshReviews}
+                          className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg border border-slate-300 bg-slate-50 hover:bg-slate-100 text-xs font-semibold text-slate-700 whitespace-nowrap cursor-pointer transition-colors disabled:opacity-50"
+                        >
+                          <RefreshCw
+                            className={`w-3.5 h-3.5 ${
+                              isSyncing ? "animate-spin" : ""
+                            }`}
+                          />
+                          <span>
+                            {isSyncing
+                              ? "Syncing from Google..."
+                              : isConnected
+                              ? "Sync Google Reviews"
+                              : "Connect to Sync"}
+                          </span>
+                        </button>
+
+                        {(locFilter !== "All Locations" ||
+                          statusFilter !== "All" ||
+                          searchQuery !== "") && (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              handleDrillDownToWorkstation({
+                                location: "All Locations",
+                                status: "All",
+                                search: "",
+                              })
+                            }
+                            className="px-3 py-2 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-xs font-medium text-slate-600 whitespace-nowrap cursor-pointer transition-colors"
+                          >
+                            Clear Filters
+                          </button>
+                        )}
+                      </div>
 
                       {syncNotice && (
                         <span className="text-xs text-slate-600">
@@ -1341,7 +1450,20 @@ export default function App() {
             </div>
           )}
 
-          {/* TAB 2: MANAGE CONFIGURATION */}
+          {/* TAB 2: GROWTH ANALYTICS */}
+          {activeTab === "analytics" && (
+            <GrowthAnalyticsView
+              reviews={allReviews}
+              locations={locations}
+              isConnected={isConnected}
+              isSyncing={isSyncing}
+              onSyncReviews={handleRefreshReviews}
+              onNavigateConfig={() => setActiveTab("config")}
+              onDrillDownToWorkstation={handleDrillDownToWorkstation}
+            />
+          )}
+
+          {/* TAB 3: MANAGE CONFIGURATION */}
           {activeTab === "config" && (
             <div className="space-y-5">
               <div>
